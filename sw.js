@@ -1,5 +1,5 @@
 /* GIG WARS — offline app-shell service worker */
-const CACHE = 'gigwars-v8';
+const CACHE = 'gigwars-v9';
 const SHELL = [
   './',
   './index.html',
@@ -30,10 +30,20 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
 
-  // Navigations: serve the cached app shell first so the game opens offline.
+  // Navigations: network first, fall back to the cached shell so the game still
+  // opens offline. Cache-first here meant a deploy took two loads to appear —
+  // the first load served the old shell and only then updated the worker.
   if (req.mode === 'navigate') {
     e.respondWith(
-      caches.match('./index.html').then((cached) => cached || fetch(req))
+      fetch(req)
+        .then((res) => {
+          if (res && res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put('./index.html', copy));
+          }
+          return res;
+        })
+        .catch(() => caches.match('./index.html'))
     );
     return;
   }
