@@ -5,6 +5,15 @@
 //   POST /api/dispatch {action:"submit", title, choices?:[a,b], by, device}
 //   POST /api/dispatch {action:"beat", scenario, choice:0|1, text, tone:"good"|"bad", by, device}
 //   POST /api/dispatch {action:"vote", id, kind?:"beat", device}
+//   POST /api/dispatch {action:"claim", handle}          → { handle, token, code }
+//   POST /api/dispatch {action:"restore", handle, code}  → { handle, token }
+//   POST /api/dispatch {action:"check", handle, token}   → { valid }
+//
+// Tour names (no Google, no email): a player claims a name; the browser keeps a secret token
+// and gets a one-time recovery code. Posts carry the name only when the token checks out —
+// otherwise they post as @roadie, so nobody can type someone else's name. Only hashes of
+// the token and the code are stored. Restoring on a new device issues a new token, which
+// signs the old browser out: one name, one browser.
 //
 // Story mode (step 2): a scenario can carry two choices, which makes it a fork. A beat is
 // "what happens next" after one choice; beats are voted in at BEAT_THRESHOLD and then every
@@ -31,6 +40,8 @@ export const THRESHOLD = 5;
 export const BEAT_THRESHOLD = 3;
 const COLL = 'gigwarsDispatch';
 const BEATS = 'gigwarsBeats';
+const NAMES = 'gigwarsNames';
+const RESERVED = new Set(['roadie', 'admin', 'mod', 'mods', 'vinny', 'gigwars', 'oats', 'crew', 'anon', 'system', 'claude']);
 const MAX_CHOICE = 26, MAX_BEAT = 140;
 // Starter forks shipped in the game (FORKS in gw-data.jsx): the server keeps its own copy of
 // the titles and choice labels, so a beat can't claim to belong to a road that says otherwise.
@@ -42,6 +53,7 @@ export const STARTER_FORKS = {
 };
 const LIMITS = 'gigwarsLimits';
 const PER_10_MIN = 3, PER_DAY = 12;
+const NAME_PER_10_MIN = 8, NAME_PER_DAY = 30;   // claims + restores, separate from posting
 const MAX_TITLE = 46;
 
 let _db = null;
@@ -65,12 +77,73 @@ const hash = (s) => crypto.createHash('sha256').update(salt() + ':' + s).digest(
 function ipOf(req) {
   return String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown').split(',')[0].trim();
 }
-function handleOf(by) {
-  const h = String(by || '').toLowerCase().replace(/^@/, '').replace(/[^a-z0-9_]/g, '').slice(0, 16);
-  if (!h) return '@roadie';
-  return screen(h + ' ok').ok && screen(h + ' ok').text === h + ' ok' ? '@' + h : '@roadie';
-}
 const now = () => Date.now();
+
+// --- tour names --------------------------------------------------------------------------
+const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
+function sameHash(a, b) {
+  const x = Buffer.from(String(a || ''), 'hex'), y = Buffer.from(String(b || ''), 'hex');
+  return x.length === y.length && x.length > 0 && crypto.timingSafeEqual(x, y);
+}
+function cleanName(h) {
+  const n = String(h || '').toLowerCase().replace(/^@/, '').trim();
+  if (!/^[a-z0-9_]{3,16}$/.test(n)) return null;
+  const f = screen(n + ' ok');
+  return f.ok && f.text === n + ' ok' ? n : null;
+}
+// Crockford-ish alphabet, no 0/O/1/I/L — readable off a phone screen
+const CODE_ABC = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
+function newCode() {
+  const b = crypto.randomBytes(12); let s = '';
+  for (let i = 0; i < 12; i++) s += CODE_ABC[b[i] % CODE_ABC.length];
+  return s.slice(0, 4) + '-' + s.slice(4, 8) + '-' + s.slice(8, 12);
+}
+const normCode = (c) => String(c || '').toUpperCase().replace(/[^0-9A-Z]/g, '');
+const newToken = () => crypto.randomBytes(24).toString('base64url');
+
+// The name a post is attributed to: the claimed name if the token matches, else @roadie.
+async function resolveBy(store, body) {
+  const n = cleanName(body.handle);
+  if (!n || !body.token) return '@roadie';
+  const snap = await store.collection(NAMES).doc(n).get();
+  return snap.exists && sameHash(snap.data().tokenHash, sha(body.token)) ? '@' + n : '@roadie';
+}
+
+async function claim(store, req, body) {
+  const n = cleanName(body.handle);
+  if (!n) return [422, { ok: false, error: '3–16 letters, numbers or _ — and keep it clean' }];
+  if (RESERVED.has(n)) return [409, { ok: false, error: 'that name is reserved' }];
+  const limited = await rateLimit(store, 'n' + hash(ipOf(req)), NAME_PER_10_MIN, NAME_PER_DAY);
+  if (limited) return [429, { ok: false, error: limited }];
+  const token = newToken(), code = newCode();
+  const ref = store.collection(NAMES).doc(n);
+  return store.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (snap.exists) return [409, { ok: false, error: 'that name is taken' }];
+    tx.set(ref, { tokenHash: sha(token), codeHash: sha(normCode(code)), createdAt: now(), lastRestore: 0 });
+    return [201, { ok: true, handle: '@' + n, token, code }];
+  });
+}
+
+async function restore(store, req, body) {
+  const n = cleanName(body.handle);
+  if (!n) return [422, { ok: false, error: 'no such name' }];
+  const limited = await rateLimit(store, 'n' + hash(ipOf(req)), NAME_PER_10_MIN, NAME_PER_DAY);
+  if (limited) return [429, { ok: false, error: limited }];
+  const ref = store.collection(NAMES).doc(n);
+  return store.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists || !sameHash(snap.data().codeHash, sha(normCode(body.code)))) return [403, { ok: false, error: 'name and code don\'t match' }];
+    const token = newToken();
+    tx.update(ref, { tokenHash: sha(token), lastRestore: now() });
+    return [200, { ok: true, handle: '@' + n, token }];
+  });
+}
+
+async function check(store, body) {
+  const by = await resolveBy(store, body);
+  return [200, { ok: true, valid: by !== '@roadie' }];
+}
 
 function pub(id, d) {
   return { id, title: d.title, by: d.by, status: d.status, votes: d.votes || 0, createdAt: d.createdAt || 0,
@@ -98,7 +171,7 @@ async function list(store) {
   return { queue, live, beatQueue, beats };
 }
 
-async function rateLimit(store, who) {
+async function rateLimit(store, who, per10 = PER_10_MIN, perDay = PER_DAY) {
   const ref = store.collection(LIMITS).doc(who);
   return store.runTransaction(async (tx) => {
     const snap = await tx.get(ref); const d = snap.exists ? snap.data() : {};
@@ -106,8 +179,8 @@ async function rateLimit(store, who) {
     let w = d.w || t, wc = d.wc || 0, day = d.day || t, dc = d.dc || 0;
     if (t - w > 10 * 60e3) { w = t; wc = 0; }
     if (t - day > 24 * 3600e3) { day = t; dc = 0; }
-    if (wc >= PER_10_MIN) return 'slow down — 3 dispatches per 10 minutes';
-    if (dc >= PER_DAY) return 'that\'s the daily limit — back tomorrow';
+    if (wc >= per10) return per10 === PER_10_MIN ? 'slow down — 3 dispatches per 10 minutes' : 'too many tries — wait a few minutes';
+    if (dc >= perDay) return 'that\'s the daily limit — back tomorrow';
     tx.set(ref, { w, wc: wc + 1, day, dc: dc + 1 });
     return null;
   });
@@ -133,7 +206,7 @@ async function submit(store, req, body) {
   // no duplicates of something already in the queue or live
   const dup = await store.collection(COLL).where('title', '==', title).limit(1).get();
   if (!dup.empty) return [409, { ok: false, error: 'already dispatched — go vote for it' }];
-  const doc = { title, by: handleOf(body.by), status: 'PENDING', votes: 1, voters: [ip, dev], createdAt: now(), ...(choices ? { choices } : {}) };
+  const doc = { title, by: await resolveBy(store, body), status: 'PENDING', votes: 1, voters: [ip, dev], createdAt: now(), ...(choices ? { choices } : {}) };
   const ref = await store.collection(COLL).add(doc);
   return [201, { ok: true, item: pub(ref.id, doc) }];
 }
@@ -161,7 +234,7 @@ async function beat(store, req, body) {
   const ip = hash(ipOf(req)), dev = hash('d:' + String(body.device || ''));
   const limited = await rateLimit(store, ip);
   if (limited) return [429, { ok: false, error: limited }];
-  const doc = { scenario, scenarioTitle, choice, choiceLabel, text: f.text, tone, by: handleOf(body.by),
+  const doc = { scenario, scenarioTitle, choice, choiceLabel, text: f.text, tone, by: await resolveBy(store, body),
     status: 'PENDING', votes: 1, voters: [ip, dev], createdAt: now() };
   const ref = await store.collection(BEATS).add(doc);
   return [201, { ok: true, item: pubBeat(ref.id, doc) }];
@@ -220,7 +293,10 @@ export default async function handler(req, res) {
     const [status, obj] = body.action === 'vote' ? await vote(store, req, body)
       : body.action === 'submit' ? await submit(store, req, body)
       : body.action === 'beat' ? await beat(store, req, body)
-      : [400, { ok: false, error: 'action must be submit, beat or vote' }];
+      : body.action === 'claim' ? await claim(store, req, body)
+      : body.action === 'restore' ? await restore(store, req, body)
+      : body.action === 'check' ? await check(store, body)
+      : [400, { ok: false, error: 'unknown action' }];
     return send(status, obj);
   } catch (err) {
     console.error(JSON.stringify({ event: 'dispatch-failed', reason: err.message || String(err) }));
