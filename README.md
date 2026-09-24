@@ -33,3 +33,17 @@ Firebase and the project's rules (MGMT, CrewFam) are untouched.
 - The game source lives inside `index.html`'s bundler manifest (gzip + base64 per file):
   `gw-store.jsx` (the store) and `gw-ios-dispatch.jsx` (the screen). Decode, edit, re-encode.
 - `sw.js` never caches `/api/` — the feed is live data.
+
+## Story mode (forks)
+
+Some road stops are forks: WHAT DO YOU DO? with two choices. Each choice has endings — the
+starter forks (`FORKS` in gw-data.jsx, mirrored as `STARTER_FORKS` in api/dispatch.js; keep the
+two in step) ship with one each, and players write more. A written ending ("beat") goes to the
+VOTE queue and becomes canon at 3 votes; a player who takes that road gets one of its endings
+at random, so every road's story grows as people play. If nobody has written an ending for a
+road yet, the player is told they're first and can write it.
+
+A dispatch can also be a fork (FEED → + MAKE IT A FORK): once voted live it fires with its two
+choices, and all of its endings are player-written.
+
+Pack space grows with the tour: 40 slots at the first stop, +10 per city (`packFor`).
