@@ -1,5 +1,5 @@
 /* GIG WARS — offline app-shell service worker */
-const CACHE = 'gigwars-v11';
+const CACHE = 'gigwars-v12';
 const SHELL = [
   './',
   './index.html',
@@ -29,6 +29,8 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
+  // The DISPATCH feed is live data (votes, new submissions): never cache it.
+  if (new URL(req.url).pathname.startsWith('/api/')) return;
 
   // Navigations: network first, fall back to the cached shell so the game still
   // opens offline. Cache-first here meant a deploy took two loads to appear —
