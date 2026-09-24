@@ -8,12 +8,17 @@
 //   POST /api/dispatch {action:"claim", handle}          → { handle, token, code }
 //   POST /api/dispatch {action:"restore", handle, code}  → { handle, token }
 //   POST /api/dispatch {action:"check", handle, token}   → { valid }
+//   POST /api/dispatch {action:"recode", handle, token}  → { code, link, qr }   (old code stops working)
 //
 // Tour names (no Google, no email): a player claims a name; the browser keeps a secret token
 // and gets a one-time recovery code. Posts carry the name only when the token checks out —
 // otherwise they post as @roadie, so nobody can type someone else's name. Only hashes of
 // the token and the code are stored. Restoring on a new device issues a new token, which
 // signs the old browser out: one name, one browser.
+//
+// The recovery code also comes as a QR: a link to the game with the name and code after the
+// '#' (never sent to a server, never in a log). Scanning it on a new phone offers the restore.
+// The QR is drawn here from the freshly issued code, so the code never travels back up.
 //
 // Story mode (step 2): a scenario can carry two choices, which makes it a fork. A beat is
 // "what happens next" after one choice; beats are voted in at BEAT_THRESHOLD and then every
@@ -34,6 +39,7 @@
 // device and per connection, and stored identities are salted hashes, never raw IPs.
 
 import crypto from 'node:crypto';
+import QRCode from 'qrcode';
 import { screen } from '../lib/filter.js';
 
 export const THRESHOLD = 5;
@@ -101,6 +107,19 @@ function newCode() {
 const normCode = (c) => String(c || '').toUpperCase().replace(/[^0-9A-Z]/g, '');
 const newToken = () => crypto.randomBytes(24).toString('base64url');
 
+// Where a recovery link may point: this game's own hosts only, whatever the request claims.
+function gameOrigin(req) {
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase();
+  if (/^gigwars(-[a-z0-9-]+)?\.vercel\.app$/.test(host)) return 'https://' + host;
+  if (/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host)) return 'http://' + host;
+  return 'https://gigwars.vercel.app';
+}
+async function recovery(req, name, code) {
+  const link = `${gameOrigin(req)}/#restore=${name}.${normCode(code)}`;
+  const qr = await QRCode.toString(link, { type: 'svg', margin: 1, errorCorrectionLevel: 'M', color: { dark: '#000000', light: '#ffffff' } });
+  return { code, link, qr };
+}
+
 // The name a post is attributed to: the claimed name if the token matches, else @roadie.
 async function resolveBy(store, body) {
   const n = cleanName(body.handle);
@@ -121,8 +140,25 @@ async function claim(store, req, body) {
     const snap = await tx.get(ref);
     if (snap.exists) return [409, { ok: false, error: 'that name is taken' }];
     tx.set(ref, { tokenHash: sha(token), codeHash: sha(normCode(code)), createdAt: now(), lastRestore: 0 });
-    return [201, { ok: true, handle: '@' + n, token, code }];
+    return [201, null];
+  }).then(async (r) => r[1] ? r : [201, { ok: true, handle: '@' + n, token, ...(await recovery(req, n, code)) }]);
+}
+
+// A new recovery code (and QR) for a signed-in name; the old one stops working.
+async function recode(store, req, body) {
+  const n = cleanName(body.handle);
+  if (!n || !body.token) return [401, { ok: false, error: 'sign in first' }];
+  const limited = await rateLimit(store, 'n' + hash(ipOf(req)), NAME_PER_10_MIN, NAME_PER_DAY);
+  if (limited) return [429, { ok: false, error: limited }];
+  const code = newCode();
+  const ref = store.collection(NAMES).doc(n);
+  const res = await store.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists || !sameHash(snap.data().tokenHash, sha(body.token))) return [401, { ok: false, error: 'sign in first' }];
+    tx.update(ref, { codeHash: sha(normCode(code)), recodedAt: now() });
+    return [200, null];
   });
+  return res[1] ? res : [200, { ok: true, handle: '@' + n, ...(await recovery(req, n, code)) }];
 }
 
 async function restore(store, req, body) {
@@ -296,6 +332,7 @@ export default async function handler(req, res) {
       : body.action === 'claim' ? await claim(store, req, body)
       : body.action === 'restore' ? await restore(store, req, body)
       : body.action === 'check' ? await check(store, body)
+      : body.action === 'recode' ? await recode(store, req, body)
       : [400, { ok: false, error: 'unknown action' }];
     return send(status, obj);
   } catch (err) {

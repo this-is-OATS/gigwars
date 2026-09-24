@@ -3,8 +3,11 @@
   "private": true,
   "type": "module",
   "description": "GIG WARS — static index.html plus the /api/dispatch function (shared community feed).",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
-    "firebase-admin": "^13.0.0"
+    "firebase-admin": "^13.0.0",
+    "qrcode": "^1.5.4"
   }
 }
