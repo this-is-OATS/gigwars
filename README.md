@@ -56,3 +56,9 @@ filtered, a few reserved) in `gigwarsNames` and returns a token (kept in the bro
 token checks out; otherwise they post as @roadie. `action:"restore"` (name + code) issues a new
 token and signs the old browser out — one name, one browser. Only SHA-256 hashes of the token
 and code are stored. Claims and restores have their own rate limit (8 / 10 min, 30 / day).
+
+Recovery QR: claim (and `action:"recode"`, signed in) also return a QR drawn server-side from
+the fresh code. It encodes `https://<game host>/#restore=<name>.<CODE>`; the game reads that on
+open, wipes it from the address bar and history, and offers the restore. The code sits after
+the `#`, so it never reaches a server or a log. The link host is pinned to the game's own
+domains. "new recovery QR" on TOUR issues a new code and kills the old one.
