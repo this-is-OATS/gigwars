@@ -1,5 +1,5 @@
 /* GIG WARS — offline app-shell service worker */
-const CACHE = 'gigwars-v12';
+const CACHE = 'gigwars-v13';
 const SHELL = [
   './',
   './index.html',
