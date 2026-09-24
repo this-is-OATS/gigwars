@@ -47,3 +47,12 @@ A dispatch can also be a fork (FEED → + MAKE IT A FORK): once voted live it fi
 choices, and all of its endings are player-written.
 
 Pack space grows with the tour: 40 slots at the first stop, +10 per city (`packFor`).
+
+## Tour names (sign-in without Google)
+
+TOUR → SIGN IN · CLAIM YOUR TOUR NAME. `action:"claim"` reserves the name (3–16 of a-z 0-9 _,
+filtered, a few reserved) in `gigwarsNames` and returns a token (kept in the browser as
+`gigwars.id`) and a one-time recovery code. Posts and story endings carry the name only when the
+token checks out; otherwise they post as @roadie. `action:"restore"` (name + code) issues a new
+token and signs the old browser out — one name, one browser. Only SHA-256 hashes of the token
+and code are stored. Claims and restores have their own rate limit (8 / 10 min, 30 / day).
